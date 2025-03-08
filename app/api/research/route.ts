@@ -8,229 +8,227 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
 
 // Define interface types
-interface TradeAlert {
-    alertId: string;
-    summary: string;
-    product: string;
-    restrictionType: string;
-    fromCountries: string[];
-    toCountries: string[];
-    tariffRate: string | null;
-    effectiveDate: string;
-    datePublished: string;
-    source: string;
-    title: string;
-    link: string;
-    confidence: number;
-}
-
-interface AlertResponse {
-    success: boolean;
-    processed: number;
-    newAlerts: TradeAlert[];
-    forwarded: boolean;
-    forwardingDetails: {
-        success: boolean;
-        reason: string;
+interface ResearchQuery {
+    query: string;
+    filters?: {
+        startDate?: string;
+        endDate?: string;
+        categories?: string[];
+        maxResults?: number;
     };
-    dataSource: string;
-    timestamp: string;
 }
 
-export async function POST(request: NextRequest) {
+interface ResearchResult {
+    title: string;
+    content: string;
+    url?: string;
+    source: string;
+    publishedDate?: string;
+    relevance: number;
+}
+
+interface ResearchResponse {
+    success: boolean;
+    count: number;
+    results: ResearchResult[];
+    summary?: string;
+}
+
+// GET endpoint for research queries
+export async function GET(request: NextRequest) {
     try {
-        const alertData: AlertResponse = await request.json();
-        console.log(`Received ${alertData.newAlerts.length} alerts from ${alertData.dataSource}`);
+        const searchParams = request.nextUrl.searchParams;
+        const query = searchParams.get('query');
 
-        // Filter for relevant alerts only - INCLUDE simulated for testing
-        const relevantAlerts = alertData.newAlerts.filter(alert =>
-            // Focus on ban/restriction type alerts 
-            alert.restrictionType === "ban/restriction" &&
-            // Only process fairly confident alerts
-            alert.confidence >= 85
-        );
-
-        console.log(`${relevantAlerts.length} relevant alerts found for processing`);
-
-        if (relevantAlerts.length === 0) {
+        if (!query) {
             return NextResponse.json({
-                success: true,
-                message: "No relevant alerts to process",
-                processed: 0
-            });
+                success: false,
+                error: 'Query parameter is required'
+            }, { status: 400 });
         }
 
-        // Process each relevant alert
-        const processPromises = relevantAlerts.map(alert => processAlert(alert));
-        const results = await Promise.allSettled(processPromises);
+        // Parse optional parameters
+        const maxResults = parseInt(searchParams.get('maxResults') || '5', 10);
+        const categories = searchParams.get('categories')?.split(',') || [];
 
-        // Count successful processes
-        const successful = results.filter(r =>
-            r.status === "fulfilled" && r.value.success
-        ).length;
+        // Perform research
+        const results = await performResearch(query, { maxResults, categories });
 
         return NextResponse.json({
             success: true,
-            message: `Successfully processed ${successful} of ${relevantAlerts.length} alerts`,
-            processed: successful
+            count: results.length,
+            results: results
         });
-
     } catch (error) {
-        console.error("Error processing research alerts:", error);
+        console.error("Research GET error:", error);
         return NextResponse.json({
             success: false,
-            message: "Failed to process alerts",
-            error: error instanceof Error ? error.message : "Unknown error"
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
         }, { status: 500 });
     }
 }
 
-async function processAlert(alert: TradeAlert) {
+// POST endpoint for more complex research queries
+export async function POST(request: NextRequest) {
     try {
-        console.log(`Processing alert: ${alert.alertId} - ${alert.title}`);
+        // Safely parse the request body with fallback
+        const body = await request.json().catch(() => ({}));
+        const queryData = body as ResearchQuery;
 
-        // Check if we've already processed this alert
-        const { data: existingAlert } = await supabase
-            .from('processed_alerts')
-            .select('*')
-            .eq('alert_id', alert.alertId)
-            .single();
-
-        if (existingAlert) {
-            console.log(`Alert ${alert.alertId} was already processed`);
-            return { success: false, reason: "ALREADY_PROCESSED" };
+        if (!queryData?.query) {
+            return NextResponse.json({
+                success: false,
+                error: 'Query is required in the request body'
+            }, { status: 400 });
         }
 
-        // Use Gemini for deep search and validation
-        const verificationResult = await verifyWithGemini(alert);
-        console.log(`Gemini verification result: ${verificationResult.shouldRestrict ? "RESTRICT" : "IGNORE"}`);
+        // Extract query and filters
+        const { query, filters } = queryData;
 
-        // If verification suggests we should restrict this item
-        if (verificationResult.shouldRestrict) {
-            await addToRestrictedItems(alert, verificationResult);
-            console.log(`Added ${alert.product} to restricted items table`);
+        // Perform research with filters
+        const results = await performResearch(query, filters);
+
+        // Generate research summary if requested
+        let summary = undefined;
+        if (body.includeSummary) {
+            summary = await generateResearchSummary(query, results);
         }
 
-        // Record this alert as processed
-        await supabase.from('processed_alerts').insert([{
-            alert_id: alert.alertId,
-            processed_at: new Date().toISOString(),
-            result: verificationResult
-        }]);
-
-        return {
+        return NextResponse.json({
             success: true,
-            restricted: verificationResult.shouldRestrict
-        };
+            count: results.length,
+            results: results,
+            summary: summary
+        });
     } catch (error) {
-        console.error(`Error processing alert ${alert.alertId}:`, error);
-        return {
+        console.error("Research POST error:", error);
+        return NextResponse.json({
             success: false,
-            error: error instanceof Error ? error.message : String(error)
-        };
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        }, { status: 500 });
     }
 }
 
-async function verifyWithGemini(alert: TradeAlert) {
-    const prompt = `
-    Research the following trade restriction and determine if it should be added to our restricted items database:
+// Core research function using Gemini
+async function performResearch(query: string, options: any = {}): Promise<ResearchResult[]> {
+    try {
+        console.log(`Performing research for query: "${query}"`);
+
+        // Configure Gemini deep search parameters
+        const maxResults = options.maxResults || 5;
+
+        // Structure the research prompt for Gemini
+        const researchPrompt = `
+    Research the following query in depth: "${query}"
     
-    ALERT DETAILS:
-    Product/Item: ${alert.product}
-    Restriction Type: ${alert.restrictionType}
-    From Countries: ${alert.fromCountries.join(', ')}
-    To Countries: ${alert.toCountries.join(', ')}
-    Source: ${alert.source}
-    Title: "${alert.title}"
-    Summary: "${alert.summary}"
+    Please provide detailed findings including:
+    1. The most relevant information about this topic
+    2. Key facts and data points
+    3. Different perspectives if applicable
+    4. Recent developments on this subject
     
-    Please verify:
-    1. Is this a genuine trade restriction based on reliable sources?
-    2. What is the exact scope of products affected?
-    3. Is this a total ban (PROHIBITED) or a conditional restriction (RESTRICTED)?
-    4. What specific requirements exist for complying with this restriction?
-    5. What category would these items fall under (e.g., TECHNOLOGY, WEAPONS, etc.)?
+    ${options.categories?.length ? `Focus on these categories: ${options.categories.join(', ')}` : ''}
     
-    RESPOND WITH JSON ONLY:
+    For each research finding, provide:
+    - A descriptive title
+    - The main content/information
+    - The source of the information
+    - Relevance score (0.0-1.0)
+    
+    Format your response as JSON:
     {
-      "isGenuine": boolean,
-      "scope": "string describing exact products affected",
-      "severity": "PROHIBITED" or "RESTRICTED",
-      "requirements": "string explaining compliance requirements",
-      "category": "string category name",
-      "shouldRestrict": boolean,
-      "reasoning": "explanation for your decision"
+      "results": [
+        {
+          "title": "string",
+          "content": "string",
+          "url": "string",
+          "source": "string",
+          "publishedDate": "YYYY-MM-DD",
+          "relevance": number
+        },
+        ...
+      ]
     }
+    `;
+
+        // Call Gemini with retry logic
+        const results = await callGeminiWithRetry(researchPrompt, 3);
+
+        // Cache results in Supabase for future use if needed
+        try {
+            await supabase.from('research_cache').insert({
+                query: query,
+                results: results,
+                timestamp: new Date().toISOString()
+            });
+        } catch (cacheError) {
+            // Non-critical error, just log it
+            console.warn("Failed to cache research results:", cacheError);
+        }
+
+        return results;
+    } catch (error) {
+        console.error("Research error:", error);
+        throw error;
+    }
+}
+
+// Helper function to call Gemini with retry logic
+async function callGeminiWithRetry(prompt: string, maxAttempts: number): Promise<ResearchResult[]> {
+    let attempts = 0;
+    let lastError;
+
+    while (attempts < maxAttempts) {
+        try {
+            const result = await model.generateContent(prompt);
+            const responseText = result.response.text();
+
+            // Extract JSON from response
+            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+                throw new Error("Failed to extract JSON from Gemini response");
+            }
+
+            const parsedData = JSON.parse(jsonMatch[0]);
+            return parsedData?.results || [];
+
+        } catch (error) {
+            attempts++;
+            lastError = error;
+
+            if (attempts < maxAttempts) {
+                // Wait with exponential backoff
+                const delay = Math.pow(2, attempts) * 1000;
+                console.log(`Gemini API attempt ${attempts} failed, retrying in ${delay / 1000}s`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+
+    console.error(`All ${maxAttempts} Gemini API attempts failed`);
+    throw lastError || new Error("Failed to get response from Gemini API");
+}
+
+// Generate summary of research findings
+async function generateResearchSummary(query: string, results: ResearchResult[]): Promise<string> {
+    if (!results || results.length === 0) {
+        return "No research results to summarize.";
+    }
+
+    const summarizePrompt = `
+  Summarize the following research findings for the query: "${query}"
+  
+  Research data:
+  ${JSON.stringify(results.slice(0, 5))}
+  
+  Provide a concise but comprehensive summary of these findings.
   `;
 
     try {
-        // Call Gemini API with retry logic
-        let attempts = 0;
-        const maxAttempts = 3;
-        let lastError;
-
-        while (attempts < maxAttempts) {
-            try {
-                const result = await model.generateContent(prompt);
-                const responseText = result.response.text();
-
-                // Extract JSON from response
-                const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-                if (!jsonMatch) {
-                    throw new Error("Failed to extract JSON from Gemini response");
-                }
-
-                return JSON.parse(jsonMatch[0]);
-            } catch (error) {
-                attempts++;
-                lastError = error;
-
-                if (attempts < maxAttempts) {
-                    // Wait with exponential backoff
-                    const delay = Math.pow(2, attempts) * 1000;
-                    console.log(`Gemini API attempt ${attempts} failed, retrying in ${delay / 1000}s`);
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                }
-            }
-        }
-
-        console.error(`All ${maxAttempts} Gemini API attempts failed`);
-        throw lastError;
+        const result = await model.generateContent(summarizePrompt);
+        return result.response.text();
     } catch (error) {
-        console.error("Error with Gemini verification:", error);
-        // Return a default object when Gemini fails
-        return {
-            isGenuine: false,
-            scope: alert.product,
-            severity: "RESTRICTED",
-            requirements: "Verification failed, manual review required",
-            category: "UNVERIFIED",
-            shouldRestrict: false,
-            reasoning: `Could not verify due to API error: ${error}`
-        };
-    }
-}
-
-async function addToRestrictedItems(alert: TradeAlert, verification: any) {
-    // Create the restricted item entry
-    const restrictedItem = {
-        item_name: verification.scope || alert.product,
-        description: `${verification.severity === "PROHIBITED" ? "Ban" : "Restriction"} on ${alert.product} from ${alert.fromCountries.join(', ')} to ${alert.toCountries.join(', ')}. ${verification.reasoning || ""}`,
-        category: verification.category || "GENERAL",
-        severity: verification.severity || "RESTRICTED",
-        requirements: verification.requirements || null,
-        source_link: alert.link,
-        effective_date: alert.effectiveDate,
-        created_at: new Date().toISOString()
-    };
-
-    // Insert into database
-    const { error } = await supabase
-        .from('restricted_items')
-        .insert([restrictedItem]);
-
-    if (error) {
-        console.error("Failed to insert restricted item:", error);
-        throw error;
+        console.error("Summary generation error:", error);
+        return "Failed to generate summary.";
     }
 }
