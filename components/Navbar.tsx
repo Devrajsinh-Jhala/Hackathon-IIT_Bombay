@@ -1,12 +1,16 @@
 "use client";
 
 import { useState } from "react";
+import HelpChatbot from "../components/HelpChatbot";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { IconButton, Badge } from "@mui/material";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 
 export default function Navbar() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const pathname = usePathname();
+  const [chatOpen, setChatOpen] = useState(false);
 
   const toggleMenu = () => {
     setIsMenuOpen(!isMenuOpen);
@@ -14,7 +18,7 @@ export default function Navbar() {
   //let me check if this updates on our side devraj
 
   return (
-    <nav className="bg-white border-b border-gray-200 shadow-sm">
+    <nav className="static bg-white border-b border-gray-200 shadow-sm">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between h-16">
           {/* Logo & Brand */}
@@ -75,9 +79,14 @@ export default function Navbar() {
 
           {/* Right side buttons */}
           <div className="hidden md:flex items-center">
-            <button className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700">
-              Help
-            </button>
+            <IconButton
+              color="inherit"
+              onClick={() => setChatOpen(!chatOpen)}
+              sx={{ ml: "auto" }}
+            >
+              <HelpOutlineIcon />
+            </IconButton>
+            {chatOpen && <HelpChatbot onClose={() => setChatOpen(false)} />}
           </div>
 
           {/* Mobile menu button */}

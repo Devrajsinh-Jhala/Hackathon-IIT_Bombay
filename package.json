@@ -9,11 +9,15 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.0",
     "@google/generative-ai": "^0.24.0",
     "@langchain/community": "^0.3.34",
     "@langchain/google-genai": "^0.1.10",
     "@langchain/ollama": "^0.2.0",
     "@langchain/openai": "^0.4.4",
+    "@mui/icons-material": "^6.4.7",
+    "@mui/material": "^6.4.7",
     "@supabase/supabase-js": "^2.49.1",
     "@types/papaparse": "^5.3.15",
     "html2pdf.js": "^0.9.3",

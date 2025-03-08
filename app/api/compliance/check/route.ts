@@ -104,6 +104,7 @@ export const dynamic = 'force-dynamic';
 
 //* new
 // app/api/compliance/check/route.ts
+// app/api/compliance/check/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 
@@ -113,6 +114,15 @@ interface Country {
     country_name: string;
     restriction_level: string;
     restriction_reason?: string;
+}
+
+interface RestrictedItem {
+    id: number;
+    item_name: string;
+    description: string;
+    category: string;
+    severity: 'PROHIBITED' | 'RESTRICTED';
+    requirements?: string;
 }
 
 interface RuleCondition {
@@ -145,6 +155,15 @@ interface Shipment {
     origin_country?: string;
 }
 
+interface ComplianceIssue {
+    rule_name: string;
+    description: string;
+    reason?: string;
+    source_link?: string | null;
+    last_verified?: string | null;
+    priority?: 'HIGH' | 'MEDIUM' | 'LOW';
+}
+
 export async function POST(request: NextRequest) {
     try {
         const { shipment } = await request.json() as { shipment: Shipment };
@@ -164,23 +183,59 @@ export async function POST(request: NextRequest) {
             .from('restricted_countries')
             .select('*');
 
-        const issues = [];
+        // Get restricted items from the new table
+        const { data: restrictedItems = [] } = await supabase
+            .from('restricted_items')
+            .select('*');
+
+        const issues: ComplianceIssue[] = [];
+
+        // FIRST PRIORITY CHECK: Check if item is in restricted items list
+        const itemNameLower = shipment.item_name.toLowerCase();
+        const restrictedItem = restrictedItems!.find((item: RestrictedItem) =>
+            itemNameLower.includes(item.item_name.toLowerCase())
+        );
+
+        if (restrictedItem) {
+            // Create a high-priority flag for restricted items
+            const requirements = restrictedItem.requirements
+                ? `. ${restrictedItem.requirements}`
+                : "";
+
+            issues.push({
+                rule_name: `${restrictedItem.severity} ITEM`,
+                description: `This item (${shipment.item_name}) matches a ${restrictedItem.severity.toLowerCase()} item: ${restrictedItem.item_name}. ${restrictedItem.description || ""}${requirements}`,
+                priority: 'HIGH'
+            });
+
+            // If the item is PROHIBITED, we return immediately
+            if (restrictedItem.severity === 'PROHIBITED') {
+                return NextResponse.json({
+                    status: "REJECTED",
+                    shipment,
+                    details: `Shipment contains prohibited item: ${restrictedItem.item_name}. Export is not allowed.`,
+                    issues,
+                    lastUpdated: new Date().toISOString()
+                });
+            }
+        }
 
         // Check for restricted country
-        const countryRestriction = restrictedCountries?.find(
-            (country: Country) => country.country_code === shipment.destination_country
+        const countryRestriction = restrictedCountries!.find(
+            (country: Country) => country.country_code.trim().toUpperCase() === shipment.destination_country.trim().toUpperCase()
         );
 
         if (countryRestriction) {
             issues.push({
                 rule_name: 'Restricted Country',
                 description: `${countryRestriction.country_name} has restriction level: ${countryRestriction.restriction_level}`,
-                reason: countryRestriction.restriction_reason || 'Country is restricted'
+                reason: countryRestriction.restriction_reason || 'Country is restricted',
+                priority: 'HIGH'
             });
         }
 
         // Check value rules
-        const valueRule = rules?.find((rule: ComplianceRule) => rule.rule_type === 'VALUE');
+        const valueRule = rules!.find((rule: ComplianceRule) => rule.rule_type === 'VALUE');
         if (valueRule && valueRule.rule_conditions?.threshold &&
             shipment.declared_value > valueRule.rule_conditions.threshold) {
 
@@ -188,12 +243,13 @@ export async function POST(request: NextRequest) {
 
             issues.push({
                 rule_name: 'High Value Shipment',
-                description: `Value exceeds $${valueRule.rule_conditions.threshold}. Additional documentation required: ${documentation.join(', ')}`
+                description: `Value exceeds $${valueRule.rule_conditions.threshold}. Additional documentation required: ${documentation.join(', ')}`,
+                priority: 'MEDIUM'
             });
         }
 
         // Check weight rules
-        const weightRule = rules?.find((rule: ComplianceRule) => rule.rule_type === 'WEIGHT');
+        const weightRule = rules!.find((rule: ComplianceRule) => rule.rule_type === 'WEIGHT');
         if (weightRule && weightRule.rule_conditions?.max_weight &&
             shipment.weight > weightRule.rule_conditions.max_weight) {
 
@@ -201,27 +257,26 @@ export async function POST(request: NextRequest) {
 
             issues.push({
                 rule_name: 'Excess Weight',
-                description: `Weight exceeds ${weightRule.rule_conditions.max_weight}${unit}. Consider splitting shipment or using specialized shipping service.`
+                description: `Weight exceeds ${weightRule.rule_conditions.max_weight}${unit}. Consider splitting shipment or using specialized shipping service.`,
+                priority: 'MEDIUM'
             });
         }
 
         // Check product-specific rules
-        const itemName = shipment.item_name?.toLowerCase() || '';
-
         // Find rules that match this product
-        const productRules = rules?.filter((rule: ComplianceRule) => {
+        const productRules = rules!.filter((rule: ComplianceRule) => {
             if (!rule.product_name) return false;
 
             const productName = rule.product_name.toLowerCase();
             // Check if the shipment item contains this product or vice versa
             return (
-                itemName.includes(productName) ||
-                productName.includes(itemName)
+                itemNameLower.includes(productName) ||
+                productName.includes(itemNameLower)
             );
         });
 
         // Apply any matching product rules
-        for (const rule of productRules!) {
+        for (const rule of productRules) {
             // Check if the rule applies to this shipment
             let ruleApplies = true;
 
@@ -268,18 +323,30 @@ export async function POST(request: NextRequest) {
                     rule_name: `${rule.rule_type} on ${rule.product_name}`,
                     description: ruleDetails,
                     source_link: rule.source_link || null,
-                    last_verified: rule.last_verified || null
+                    last_verified: rule.last_verified || null,
+                    priority: 'MEDIUM'
                 });
             }
         }
 
+        // Determine compliance status
+        let status = "COMPLIANT";
+        let details = "This shipment complies with all regulations.";
+
+        if (issues.length > 0) {
+            // Check if there are any HIGH priority issues
+            const hasHighPriorityIssues = issues.some(issue => issue.priority === 'HIGH');
+            status = hasHighPriorityIssues ? "FLAGGED" : "REVIEW";
+            details = hasHighPriorityIssues
+                ? 'Significant compliance issues detected with this shipment.'
+                : 'Minor compliance issues detected with this shipment. Review recommended.';
+        }
+
         // Return the compliance result
         return NextResponse.json({
-            status: issues.length > 0 ? 'FLAGGED' : 'COMPLIANT',
+            status,
             shipment,
-            details: issues.length > 0
-                ? 'Compliance issues detected with this shipment.'
-                : 'This shipment complies with all regulations.',
+            details,
             issues,
             lastUpdated: new Date().toISOString()
         });
