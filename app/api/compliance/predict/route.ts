@@ -6,7 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 
 // export const dynamic = 'force-dynamic';
 
-// Initialize Google Generative AI with your API key
+
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 export async function POST(request: Request) {

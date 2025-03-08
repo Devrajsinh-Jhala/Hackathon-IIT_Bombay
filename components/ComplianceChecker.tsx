@@ -1,4 +1,5 @@
 "use client";
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 import { useState, useEffect, useRef } from "react";
 import Papa from "papaparse";
@@ -53,6 +54,36 @@ export default function ComplianceChecker() {
   const [csvData, setCsvData] = useState<ShipmentData[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [generatingPdf, setGeneratingPdf] = useState<boolean>(false);
+
+  // Add these new states to your component
+  const [aiPredictions, setAiPredictions] = useState<{ [key: string]: string }>(
+    {}
+  );
+  const [predictionsLoading, setPredictionsLoading] = useState<boolean>(false);
+
+  // Add this function to fetch AI predictions
+  const fetchAIPrediction = async (shipment: ShipmentData): Promise<string> => {
+    try {
+      const response = await fetch(`/api/compliance/predict?t=${Date.now()}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache",
+        },
+        body: JSON.stringify({ shipment }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to get AI prediction");
+      }
+
+      const data = await response.json();
+      return data.prediction;
+    } catch (error) {
+      console.error("Error fetching AI prediction:", error);
+      return "Unable to generate compliance recommendations at this time.";
+    }
+  };
 
   const router = useRouter();
 
@@ -140,6 +171,17 @@ export default function ComplianceChecker() {
 
       const result = await response.json();
       setResults([result]);
+
+      if (result.status === "COMPLIANT") {
+        setPredictionsLoading(true);
+        const prediction = await fetchAIPrediction(shipmentData);
+        setAiPredictions((prev) => ({
+          ...prev,
+          [`${shipmentData.item_name}_${shipmentData.destination_country}`]:
+            prediction,
+        }));
+        setPredictionsLoading(false);
+      }
     } catch (error) {
       console.error("Error checking compliance:", error);
       alert("Failed to check compliance. Please try again.");
@@ -214,6 +256,7 @@ export default function ComplianceChecker() {
     }
 
     setLoading(true);
+    setPredictionsLoading(true); // Set this to true as predictions will now be included
 
     try {
       // Get validation from backend API that checks against rules in Supabase
@@ -230,7 +273,89 @@ export default function ComplianceChecker() {
       }
 
       const results = await response.json();
+
       setResults(results);
+
+      // Process AI predictions for compliant shipments - with throttling
+      const compliantShipments = results
+        .filter((r: ComplianceResult) => r.status === "COMPLIANT")
+        .map((r: ComplianceResult) => r.shipment);
+
+      if (compliantShipments.length > 0) {
+        setPredictionsLoading(true);
+
+        // Create a new object to store predictions as they come in
+        const newPredictions: { [key: string]: string } = { ...aiPredictions };
+
+        // Process each prediction sequentially with delay between requests
+        for (let i = 0; i < compliantShipments.length; i++) {
+          const shipment = compliantShipments[i];
+          const shipmentKey = `${shipment.item_name}_${shipment.destination_country}`;
+
+          try {
+            // Skip if we already have this prediction
+            if (newPredictions[shipmentKey]) continue;
+
+            // Add delay between requests to avoid rate limiting (except for first request)
+            if (i > 0) {
+              await delay(300); // 300ms between requests
+            }
+
+            // Fetch prediction
+            const prediction = await fetchAIPrediction(shipment);
+
+            // Store the prediction
+            newPredictions[shipmentKey] = prediction;
+
+            // Update state periodically to show progress
+            if (i % 5 === 0 || i === compliantShipments.length - 1) {
+              setAiPredictions({ ...newPredictions });
+            }
+          } catch (error) {
+            console.error(
+              `Error fetching prediction for item ${i + 1}:`,
+              error
+            );
+            // Continue with next item even if one fails
+          }
+        }
+
+        // Final update of predictions state
+        setAiPredictions(newPredictions);
+        setPredictionsLoading(false);
+      }
+
+      // setResults(results);
+
+      // // Process AI predictions for compliant shipments
+      // const compliantShipments = results
+      //   .filter((r: ComplianceResult) => r.status === "COMPLIANT")
+      //   .map((r: ComplianceResult) => r.shipment);
+
+      // if (compliantShipments.length > 0) {
+      //   setPredictionsLoading(true);
+
+      //   // Process predictions in batches to avoid overwhelming the API
+      //   const predictionsPromises = compliantShipments.map(async (shipment: ShipmentData) => {
+      //     const shipmentKey = `${shipment.item_name}_${shipment.destination_country}`;
+      //     const prediction = await fetchAIPrediction(shipment);
+      //     return { key: shipmentKey, prediction };
+      //   });
+
+      //   // Wait for all predictions to complete
+      //   const newPredictions = await Promise.all(predictionsPromises);
+
+      //   // Update the predictions state
+      //   setAiPredictions(prev => {
+      //     const updated = { ...prev };
+      //     newPredictions.forEach(item => {
+      //       updated[item.key] = item.prediction;
+      //     });
+      //     return updated;
+      //   });
+
+      //   setPredictionsLoading(false);
+      // }
     } catch (error) {
       console.error("Error processing CSV data:", error);
       alert("Failed to process shipments. Please try again.");
@@ -287,14 +412,42 @@ export default function ComplianceChecker() {
         },
       });
 
-      // Add footer
+      // Get final Y position after the table
       const finalY = (doc as any).lastAutoTable.finalY || 120;
+
+      // Get shipment key for AI prediction lookup
+      const shipmentKey = `${shipment.item_name}_${shipment.destination_country}`;
+      const aiPrediction =
+        aiPredictions[shipmentKey] ||
+        "No AI recommendations available for this shipment.";
+
+      // Add AI recommendations section
+      doc.setTextColor(37, 99, 235);
+      doc.setFontSize(16);
+      doc.text("AI Compliance Recommendations", 14, finalY + 20);
+
+      // Add the AI prediction text with wrapping
+      doc.setTextColor(0, 0, 0);
+      doc.setFontSize(11);
+
+      // Clean the text from HTML tags if needed
+      const tempDiv = document.createElement("div");
+      tempDiv.innerHTML = aiPrediction;
+      const plainText =
+        tempDiv.textContent || tempDiv.innerText || aiPrediction;
+
+      // Add text with word wrap
+      const splitText = doc.splitTextToSize(plainText, 180);
+      doc.text(splitText, 14, finalY + 30);
+
+      // Add footer
+      const predictionHeight = splitText.length * 6; // Approximate height of prediction text
       doc.setFontSize(10);
       doc.setTextColor(100, 100, 100);
       doc.text(
         `This compliance report was generated on ${new Date().toLocaleString()} and is valid for 24 hours.`,
         14,
-        finalY + 20
+        finalY + 40 + predictionHeight
       );
 
       // Save PDF
@@ -314,8 +467,8 @@ export default function ComplianceChecker() {
   // Download all compliant reports as PDFs
   const downloadAllCompliantReports = () => {
     const compliantShipments = results
-      .filter((r) => r.status === "COMPLIANT")
-      .map((r) => r.shipment);
+      .filter((r: ComplianceResult) => r.status === "COMPLIANT")
+      .map((r: ComplianceResult) => r.shipment);
 
     if (compliantShipments.length === 0) {
       alert("No compliant shipments found.");
@@ -324,7 +477,7 @@ export default function ComplianceChecker() {
 
     // Download each report with a slight delay to avoid browser issues
     setGeneratingPdf(true);
-    compliantShipments.forEach((shipment, index) => {
+    compliantShipments.forEach((shipment: ShipmentData, index: number) => {
       setTimeout(() => {
         generatePdfReport(shipment);
         if (index === compliantShipments.length - 1) {
@@ -576,7 +729,8 @@ export default function ComplianceChecker() {
                 Compliance Results
               </h2>
 
-              {results.filter((r) => r.status === "COMPLIANT").length > 0 && (
+              {results.filter((r: ComplianceResult) => r.status === "COMPLIANT")
+                .length > 0 && (
                 <button
                   onClick={downloadAllCompliantReports}
                   disabled={generatingPdf}
@@ -632,83 +786,131 @@ export default function ComplianceChecker() {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {results.map((result, index) => (
-                    <tr
-                      key={index}
-                      className={result.status === "FLAGGED" ? "bg-red-50" : ""}
-                    >
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="font-medium">
-                          {result.shipment.item_name}
-                        </div>
-                        <div className="text-sm text-gray-500">
-                          {result.shipment.item_id || "No ID"}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span
-                          className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full 
-                          ${
-                            result.status === "COMPLIANT"
-                              ? "bg-green-100 text-green-800"
-                              : "bg-red-100 text-red-800"
-                          }`}
-                        >
-                          {result.status}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {result.shipment.destination_country}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        ${result.shipment.declared_value.toFixed(2)}
-                      </td>
-                      <td className="px-6 py-4">
-                        {result.status === "FLAGGED" &&
-                          result.issues.map((issue, i) => (
-                            <div key={i} className="text-sm text-red-600 mb-1">
-                              • {issue.rule_name}: {issue.description}
-                            </div>
-                          ))}
-                        {result.status === "COMPLIANT" && (
-                          <div className="text-sm text-green-600">
-                            No issues found
+                  {results.map((result, index) => {
+                    const shipmentKey = `${result.shipment.item_name}_${result.shipment.destination_country}`;
+                    const hasPrediction =
+                      result.status === "COMPLIANT" &&
+                      aiPredictions[shipmentKey];
+
+                    return (
+                      <tr
+                        key={index}
+                        className={
+                          result.status === "FLAGGED" ? "bg-red-50" : ""
+                        }
+                      >
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="font-medium">
+                            {result.shipment.item_name}
                           </div>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {result.status === "COMPLIANT" && (
-                          <button
-                            onClick={() => generatePdfReport(result.shipment)}
-                            disabled={generatingPdf}
-                            className={`text-sm flex items-center ${
-                              generatingPdf
-                                ? "text-gray-400 cursor-not-allowed"
-                                : "text-blue-600 hover:text-blue-900"
+                          <div className="text-sm text-gray-500">
+                            {result.shipment.item_id || "No ID"}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span
+                            className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full 
+                            ${
+                              result.status === "COMPLIANT"
+                                ? "bg-green-100 text-green-800"
+                                : "bg-red-100 text-red-800"
                             }`}
                           >
-                            <svg
-                              className="h-4 w-4 mr-1"
-                              fill="none"
-                              viewBox="0 0 24 24"
-                              stroke="currentColor"
+                            {result.status}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {result.shipment.destination_country}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          ${result.shipment.declared_value.toFixed(2)}
+                        </td>
+                        <td className="px-6 py-4">
+                          {result.status === "FLAGGED" &&
+                            result.issues.map((issue, i) => (
+                              <div
+                                key={i}
+                                className="text-sm text-red-600 mb-1"
+                              >
+                                • {issue.rule_name}: {issue.description}
+                              </div>
+                            ))}
+                          {result.status === "COMPLIANT" && (
+                            <div className="text-sm text-green-600">
+                              No issues found
+                              {predictionsLoading && (
+                                <span className="ml-2 text-gray-500">
+                                  (Loading AI recommendations...)
+                                </span>
+                              )}
+                              {hasPrediction && (
+                                <span className="block mt-1 text-gray-600 italic">
+                                  AI recommendations available
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {result.status === "COMPLIANT" && (
+                            <button
+                              onClick={() => generatePdfReport(result.shipment)}
+                              disabled={generatingPdf}
+                              className={`text-sm flex items-center ${
+                                generatingPdf
+                                  ? "text-gray-400 cursor-not-allowed"
+                                  : "text-blue-600 hover:text-blue-900"
+                              }`}
                             >
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth={2}
-                                d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                              />
-                            </svg>
-                            Generate PDF
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                              <svg
+                                className="h-4 w-4 mr-1"
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                                />
+                              </svg>
+                              Generate PDF
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
+
+            {/* AI Recommendations Display for Single Item */}
+            {results.length === 1 && results[0].status === "COMPLIANT" && (
+              <div className="px-6 py-4 border-t border-gray-100">
+                <h3 className="text-lg font-medium text-blue-700 mb-2">
+                  AI Compliance Recommendations
+                </h3>
+                {predictionsLoading ? (
+                  <div className="text-gray-500">
+                    Loading recommendations...
+                  </div>
+                ) : (
+                  <div className="bg-blue-50 p-4 rounded-lg">
+                    <div
+                      className="text-gray-700"
+                      dangerouslySetInnerHTML={{
+                        __html:
+                          aiPredictions[
+                            `${results[0].shipment.item_name}_${results[0].shipment.destination_country}`
+                          ] || "No recommendations available yet.",
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

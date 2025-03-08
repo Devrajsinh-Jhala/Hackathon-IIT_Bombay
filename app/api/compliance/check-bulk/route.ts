@@ -1,9 +1,13 @@
+// async function delay(ms: number) {
+//     return new Promise(resolve => setTimeout(resolve, ms));
+//   }
+
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // Prevent caching to ensure fresh data on each request
-// export const dynamic = "force-dynamic";
+export const dynamic = "force-dynamic";
 
 // Initialize Supabase client
 const supabase = createClient(
@@ -11,10 +15,7 @@ const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
 );
 
-// Initialize Gemini AI if API key is available
-const genAI = process.env.GEMINI_API_KEY
-    ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
-    : null;
+
 
 export async function POST(request: Request) {
     try {
@@ -161,6 +162,61 @@ export async function POST(request: Request) {
             const batchResults = await Promise.all(batchPromises);
             results.push(...batchResults);
         }
+
+        //  // Now, add AI predictions for COMPLIANT shipments with proper throttling
+        //  if (genAI) {
+        //     const compliantResults = results.filter(result => result.status === "COMPLIANT");
+        //     console.log(`Adding AI predictions for ${compliantResults.length} compliant shipments`);
+            
+        //     // Process AI predictions sequentially with delay between requests
+        //     for (let i = 0; i < compliantResults.length; i++) {
+        //         const result = compliantResults[i];
+        //         try {
+        //             // Add delay between requests (300ms) to avoid rate limiting
+        //             if (i > 0) {
+        //                 await delay(300);
+        //             }
+                    
+        //             // Initialize the generative model
+        //             const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+                    
+        //             // Create a prompt with shipment information (simplified for bulk processing)
+        //             const prompt = `
+        //               You are a compliance expert. Please provide brief shipping compliance guidance for:
+        //               - Product: ${result.shipment.item_name}
+        //               - Value: $${result.shipment.declared_value}
+        //               - Weight: ${result.shipment.weight} kg
+        //               - Destination: ${result.shipment.destination_country}
+        //               ${result.shipment.commodity_code ? `- HS Code: ${result.shipment.commodity_code}` : ''}
+                      
+        //               Focus on documentation, packaging, and import requirements. Keep it concise (under 150 words).
+        //             `;
+                    
+        //             // Generate a response with retry logic
+        //             let retries = 0;
+        //             let aiPrediction = null;
+                    
+        //             while (retries < 2 && !aiPrediction) {
+        //                 try {
+        //                     const response = await model.generateContent(prompt);
+        //                     aiPrediction = response.response.text();
+        //                 } catch (aiError) {
+        //                     console.error(`AI prediction retry ${retries + 1} failed:`, aiError);
+        //                     retries++;
+        //                     if (retries < 2) await delay(1000); // Wait longer before retry
+        //                 }
+        //             }
+                    
+        //             // Add the prediction to the result
+        //             if (aiPrediction) {
+        //                 result.aiPrediction = aiPrediction;
+        //             }
+        //         } catch (error) {
+        //             console.error(`Error generating AI prediction for item ${i + 1}:`, error);
+        //             // Continue with other predictions even if one fails
+        //         }
+        //     }
+        // }
 
         return NextResponse.json(results);
 

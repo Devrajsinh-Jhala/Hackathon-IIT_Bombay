@@ -17,6 +17,14 @@ interface ComplianceRule {
 }
 
 export default function AdminPage() {
+  const router = useRouter();
+
+  // Authentication state
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [adminEmail, setAdminEmail] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+
   // State for existing rules
   const [rules, setRules] = useState<ComplianceRule[]>([]);
   const [loading, setLoading] = useState(true);
@@ -38,10 +46,55 @@ export default function AdminPage() {
   const [itemName, setItemName] = useState<string>("");
   const [docType, setDocType] = useState<string>("");
 
-  // Fetch existing rules on component mount
+  // Check for an existing session on mount
   useEffect(() => {
-    fetchRules();
+    async function checkSession() {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      // Verify that the session exists and the user is the admin
+      if (
+        session &&
+        session.user.email === process.env.NEXT_PUBLIC_ADMIN_EMAIL
+      ) {
+        setIsAuthenticated(true);
+        fetchRules();
+      } else {
+        setIsAuthenticated(false);
+      }
+    }
+    checkSession();
   }, []);
+
+  // Function to handle admin login
+  const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setLoginError(null);
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: adminEmail,
+        password: adminPassword,
+      });
+      if (error) {
+        setLoginError(error.message);
+        return;
+      }
+      // Check that the logged in user is the admin
+      if (
+        data.session &&
+        data.session.user.email === process.env.NEXT_PUBLIC_ADMIN_EMAIL
+      ) {
+        setIsAuthenticated(true);
+        fetchRules();
+      } else {
+        setLoginError("Unauthorized: Not an admin user.");
+        await supabase.auth.signOut();
+      }
+    } catch (err: any) {
+      console.error("Login error:", err);
+      setLoginError("Login failed. Please try again.");
+    }
+  };
 
   // Function to fetch rules from Supabase
   async function fetchRules() {
@@ -234,6 +287,55 @@ export default function AdminPage() {
     }
   };
 
+  // If not authenticated, render the login form
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <div className="bg-white p-8 rounded shadow-md w-full max-w-md">
+          <h2 className="text-xl font-semibold mb-4">Admin Login</h2>
+          {loginError && (
+            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4">
+              {loginError}
+            </div>
+          )}
+          <form onSubmit={handleLogin}>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-600 mb-2">
+                Admin Email
+              </label>
+              <input
+                type="email"
+                value={adminEmail}
+                onChange={(e) => setAdminEmail(e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border border-gray-200"
+                required
+              />
+            </div>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-600 mb-2">
+                Password
+              </label>
+              <input
+                type="password"
+                value={adminPassword}
+                onChange={(e) => setAdminPassword(e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border border-gray-200"
+                required
+              />
+            </div>
+            <button
+              type="submit"
+              className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+            >
+              Login
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // If authenticated, render the admin panel
   return (
     <>
       <Navbar />
