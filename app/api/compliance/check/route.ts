@@ -336,7 +336,7 @@ export async function POST(request: NextRequest) {
         if (issues.length > 0) {
             // Check if there are any HIGH priority issues
             const hasHighPriorityIssues = issues.some(issue => issue.priority === 'HIGH');
-            status = hasHighPriorityIssues ? "FLAGGED" : "REVIEW";
+            status = hasHighPriorityIssues ? "FLAGGED" : "FLAGGED";
             details = hasHighPriorityIssues
                 ? 'Significant compliance issues detected with this shipment.'
                 : 'Minor compliance issues detected with this shipment. Review recommended.';
